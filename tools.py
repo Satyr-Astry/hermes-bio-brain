@@ -1,0 +1,345 @@
+"""
+仿生大脑 · Hermes 工具注册 (v2)
+================================
+register_tools(ctx) —— Hermes 插件加载器调用的入口。
+
+v2 升级：接的是**新大脑**（Conductor + 张量化 + 记忆库 + LLM 语言区），
+        不再是旧的 64 神经元 Python 循环版。
+
+工具（7 个）：
+  brain_ask       ★对话（大脑记忆 + LLM 表达，最常用）
+  brain_teach     教一条知识
+  brain_distill   ★向 LLM 学习一个主题（自主蒸馏）
+  brain_recall    检索记忆（看它知道什么）
+  brain_think     思考流（不输出语言，只看激活）
+  brain_sleep     睡眠巩固
+  brain_state     大脑状态
+
+铁律：
+  · 大脑独立运行（独立进程/状态文件）
+  · 不触碰 Hermes 主会话 model（防卡死网关）
+  · 懒加载 + 单例（避免重复构建）
+"""
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import threading
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+log = logging.getLogger("hermes.plugin.bio-brain")
+
+_HERE = Path(__file__).resolve().parent
+_CANDIDATES = [
+    _HERE / "brain",
+    Path(r"F:\DESKTOP\AI架构与推理设计\仿生AI项目设计\code"),
+]
+
+# ---------- 单例 ----------
+_lock = threading.Lock()
+_brain = None
+_brain_error: Optional[str] = None
+_NEURONS = 8192      # 插件对话用 8K 够（16K 太慢，30s/次）
+
+
+def _ensure_path() -> Optional[Path]:
+    for p in _CANDIDATES:
+        if (p / "conductor.py").exists():
+            sp = str(p)
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+            return p
+    return None
+
+
+def _get_brain():
+    """懒加载新大脑（Conductor + 记忆）"""
+    global _brain, _brain_error
+    if _brain is not None:
+        return _brain
+    with _lock:
+        if _brain is not None:
+            return _brain
+        path = _ensure_path()
+        if path is None:
+            _brain_error = "找不到大脑代码（需 conductor.py）"
+            return None
+        try:
+            from conductor import Conductor  # type: ignore
+            b = Conductor(n_neurons=_NEURONS,
+                          n_tracts=max(256, _NEURONS // 16),
+                          use_llm=True)
+            # 载入已学记忆
+            mem_file = path / "agent_memory.json"
+            if mem_file.exists():
+                try:
+                    mem = json.loads(mem_file.read_text(encoding="utf-8"))
+                    for m in mem:
+                        b.teach(m["text"], m["answer"],
+                                m.get("source", "oracle"))
+                    log.info("载入记忆 %d 条", len(mem))
+                except Exception as e:
+                    log.warning("记忆载入失败: %s", e)
+            _brain = b
+            log.info("仿生大脑 v2 已加载: %s (%d 神经元)", path, _NEURONS)
+        except Exception as e:
+            _brain_error = f"加载失败: {e}"
+            log.exception("仿生大脑加载失败")
+            return None
+    return _brain
+
+
+def _persist(b):
+    """把记忆写回磁盘（供下次载入）"""
+    try:
+        path = _ensure_path()
+        if path is None:
+            return
+        mem = getattr(b, "memory", [])
+        (path / "agent_memory.json").write_text(
+            json.dumps([{"text": m["text"], "answer": m["answer"],
+                         "source": m["source"]} for m in mem],
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("记忆保存失败: %s", e)
+
+
+def _err() -> str:
+    return json.dumps({"ok": False, "error": _brain_error or "大脑未就绪"},
+                      ensure_ascii=False)
+
+
+# ==================================================================
+# 工具处理
+# ==================================================================
+def _h_ask(question: str = "", **kw) -> str:
+    """★对话：大脑记忆 + LLM 表达"""
+    b = _get_brain()
+    if b is None:
+        return _err()
+    try:
+        r = b.respond(question, steps=3)   # ★steps 从6降到3（省一半时间）
+        out = {
+            "ok": True,
+            "answer": r.get("output") or "（大脑对此不确定）",
+            "confidence": r.get("confidence"),
+            "recalled": [x["text"][:60] for x in r.get("recalled", [])],
+            "brain": {"neurons": b.brain.n, "memory": len(b.memory)},
+        }
+        return json.dumps(out, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _h_teach(question: str = "", answer: str = "", **kw) -> str:
+    """教一条知识"""
+    b = _get_brain()
+    if b is None:
+        return _err()
+    try:
+        ok = b.teach(question, answer, source="oracle")
+        _persist(b)
+        return json.dumps({"ok": ok, "memory": len(b.memory)}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _h_distill(topic: str = "", rounds: int = 2, **kw) -> str:
+    """★向 LLM 学习一个主题"""
+    b = _get_brain()
+    if b is None:
+        return _err()
+    try:
+        path = _ensure_path()
+        if path is None:
+            return _err()
+        from llm_distiller import LLMDistiller  # type: ignore
+        d = LLMDistiller(b.llm, b, verbose=False)
+        r = d.distill(topic, rounds=int(rounds), check=True)
+        _persist(b)
+        return json.dumps({
+            "ok": True,
+            "topic": topic,
+            "learned": [{"aspect": l["aspect"],
+                         "chars": len(l["knowledge"]),
+                         "confidence": l["confidence"]}
+                        for l in r["learned"]],
+            "stored": r["stats"]["stored"],
+            "memory_total": len(b.memory),
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _h_recall(query: str = "", top_k: int = 3, **kw) -> str:
+    """检索记忆"""
+    b = _get_brain()
+    if b is None:
+        return _err()
+    try:
+        rs = b.recall(query, top_k=int(top_k))
+        return json.dumps({
+            "ok": True, "query": query,
+            "results": [{"score": x["score"], "text": x["text"][:70],
+                         "answer": x["answer"][:200]} for x in rs],
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _h_think(text: str = "", steps: int = 8, **kw) -> str:
+    """纯思考（不调 LLM 输出）"""
+    b = _get_brain()
+    if b is None:
+        return _err()
+    try:
+        b.perceive(text)
+        info = b.think(steps=int(steps))
+        return json.dumps({"ok": True, "input": text, **info},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _h_sleep(**kw) -> str:
+    """睡眠巩固"""
+    b = _get_brain()
+    if b is None:
+        return _err()
+    try:
+        s = b.sleep()
+        _persist(b)
+        return json.dumps({"ok": True, **s, "memory": len(b.memory)},
+                          ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+def _h_state(**kw) -> str:
+    """大脑状态"""
+    b = _get_brain()
+    if b is None:
+        return _err()
+    try:
+        s = b.stats()
+        s["ok"] = True
+        s["llm"] = {"model": b.llm.model, "available": bool(
+            b.llm and b.llm.available)} if getattr(b, "llm", None) else None
+        return json.dumps(s, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
+
+# ==================================================================
+# 注册入口
+# ==================================================================
+def register_tools(ctx):
+    """Hermes 插件加载器调用此函数"""
+    tools = [
+        {
+            "name": "brain_ask",
+            "toolset": "brain",
+            "description": "向仿生大脑提问。大脑会检索自己的神经记忆，"
+                           "再让语言区表达。适合问它学过的东西。",
+            "emoji": "🧠",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "问题"},
+                },
+                "required": ["question"],
+            },
+            "handler": _h_ask,
+        },
+        {
+            "name": "brain_distill",
+            "toolset": "brain",
+            "description": "让大脑向 LLM 学习一个主题（自主蒸馏：生成大纲→"
+                           "逐点学习→自检→入库）。",
+            "emoji": "📚",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "学习主题"},
+                    "rounds": {"type": "integer", "description": "学几个方面，默认2"},
+                },
+                "required": ["topic"],
+            },
+            "handler": _h_distill,
+        },
+        {
+            "name": "brain_recall",
+            "toolset": "brain",
+            "description": "检索大脑记忆，看看它关于某个话题知道什么。",
+            "emoji": "🔍",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "查询"},
+                    "top_k": {"type": "integer", "description": "返回条数，默认3"},
+                },
+                "required": ["query"],
+            },
+            "handler": _h_recall,
+        },
+        {
+            "name": "brain_teach",
+            "toolset": "brain",
+            "description": "直接教大脑一条知识（记住问题-答案对）。",
+            "emoji": "✍️",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "问题"},
+                    "answer": {"type": "string", "description": "答案"},
+                },
+                "required": ["question", "answer"],
+            },
+            "handler": _h_teach,
+        },
+        {
+            "name": "brain_think",
+            "toolset": "brain",
+            "description": "让大脑纯思考一段输入（激活扩散，不调语言区）。",
+            "emoji": "💭",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "思考内容"},
+                    "steps": {"type": "integer", "description": "tick 数，默认8"},
+                },
+                "required": ["text"],
+            },
+            "handler": _h_think,
+        },
+        {
+            "name": "brain_sleep",
+            "toolset": "brain",
+            "description": "让大脑睡眠巩固（合并可塑量、修剪弱连接）。",
+            "emoji": "😴",
+            "schema": {"type": "object", "properties": {}},
+            "handler": _h_sleep,
+        },
+        {
+            "name": "brain_state",
+            "toolset": "brain",
+            "description": "查看大脑状态（神经元数、激活、记忆条数、语言区）。",
+            "emoji": "📊",
+            "schema": {"type": "object", "properties": {}},
+            "handler": _h_state,
+        },
+    ]
+
+    for t in tools:
+        try:
+            ctx.register_tool(**t)
+        except TypeError:
+            # 兼容旧签名
+            ctx.register_tool(
+                name=t["name"], toolset=t["toolset"],
+                schema=t["schema"], handler=t["handler"],
+                description=t["description"])
+    log.info("bio-brain 注册 %d 个工具", len(tools))
+    return [t["name"] for t in tools]

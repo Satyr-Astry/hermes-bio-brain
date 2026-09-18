@@ -1,0 +1,14 @@
+name: bio-brain
+label: 仿生大脑
+version: 2.0.0
+description: "把仿生 AI 大脑接入 Hermes —— 7 个工具（对话/蒸馏学习/记忆检索/教学/思考/睡眠/状态）。大脑独立运行，不占用 Hermes 主会话模型。"
+author: 小悠
+kind: standalone
+provides_tools:
+  - brain_ask
+  - brain_distill
+  - brain_recall
+  - brain_teach
+  - brain_think
+  - brain_sleep
+  - brain_state
