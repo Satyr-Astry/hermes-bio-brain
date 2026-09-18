@@ -32,16 +32,22 @@
    └── desktop/plugin.js
    ```
 
-2. 大脑代码放到插件目录下的 `brain/`（推荐），或改 `tools.py` 里的 `_CANDIDATES` 指向你的路径：
+2. 把插件指向你的大脑代码，解析顺序（命中即止）：
 
-   ```python
-   _CANDIDATES = [
-       _HERE / "brain",                                  # 插件内自带
-       Path(r"F:\DESKTOP\AI架构与推理设计\仿生AI项目设计\code"),  # 外部路径
-   ]
+   | # | 来源 | 示例 |
+   |---|------|------|
+   | 1 | 环境变量 `BIOBRAIN_PATH`（或 `HERMES_BIOBRAIN_PATH`） | `BIOBRAIN_PATH=E:\BIONIC_AI\code` |
+   | 2 | 插件目录内的 `brain/` 子目录 | 自带大脑 |
+   | 3 | `config.yaml` 的 `plugins.bio-brain.brain_path` | 见下 |
+
+   ```yaml
+   # $HERMES_HOME/config.yaml
+   plugins:
+     bio-brain:
+       brain_path: "E:\\BIONIC_AI\\code"
    ```
 
-   判定条件是该目录下存在 `conductor.py`。
+   判定条件是该目录下存在 `conductor.py`。**仓库内不含任何硬编码本机路径**，未配置时干净返回错误而非崩溃。
 
 3. 重启 Hermes 网关 / 桌面端，在 `config.yaml` 的 `plugins.enabled` 中启用 `bio-brain`。
 

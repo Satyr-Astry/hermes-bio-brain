@@ -32,10 +32,45 @@ from typing import Any, Dict, Optional
 log = logging.getLogger("hermes.plugin.bio-brain")
 
 _HERE = Path(__file__).resolve().parent
-_CANDIDATES = [
-    _HERE / "brain",
-    Path(r"F:\DESKTOP\AI架构与推理设计\仿生AI项目设计\code"),
-]
+# 大脑代码位置解析顺序：
+#   1. 环境变量 BIOBRAIN_PATH（最优先，推荐）
+#   2. 插件目录内的 brain/ 子目录（自带大脑时）
+#   3. Hermes 配置项 plugins.bio-brain.brain_path（若存在）
+_CANDIDATES_ENV = ("BIOBRAIN_PATH", "HERMES_BIOBRAIN_PATH")
+
+
+def _candidate_paths() -> list:
+    """按优先级返回候选大脑目录（惰性计算，便于配置热改）"""
+    import os
+    out = []
+    for var in _CANDIDATES_ENV:
+        val = (os.environ.get(var) or "").strip()
+        if val:
+            out.append(Path(val))
+    out.append(_HERE / "brain")
+    return out
+
+
+def _config_path() -> Optional[Path]:
+    """从 Hermes 配置读 brain_path（plugins.bio-brain.brain_path）"""
+    try:
+        from hermes_constants import get_hermes_home
+        home = get_hermes_home()
+    except Exception:
+        import os
+        home = Path(os.environ.get("HERMES_HOME", "") or Path.home() / ".hermes")
+    cfg = Path(home) / "config.yaml"
+    if not cfg.is_file():
+        return None
+    try:
+        import yaml
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+        entry = ((data.get("plugins") or {}).get("bio-brain") or {})
+        val = (entry.get("brain_path") or "").strip()
+        return Path(val) if val else None
+    except Exception:
+        return None
+
 
 # ---------- 单例 ----------
 _lock = threading.Lock()
@@ -45,12 +80,20 @@ _NEURONS = 8192      # 插件对话用 8K 够（16K 太慢，30s/次）
 
 
 def _ensure_path() -> Optional[Path]:
-    for p in _CANDIDATES:
-        if (p / "conductor.py").exists():
-            sp = str(p)
-            if sp not in sys.path:
-                sys.path.insert(0, sp)
-            return p
+    """找到大脑代码目录（含 conductor.py）并加入 sys.path"""
+    cands = _candidate_paths()
+    cfg = _config_path()
+    if cfg is not None:
+        cands.append(cfg)
+    for p in cands:
+        try:
+            if (p / "conductor.py").exists():
+                sp = str(p)
+                if sp not in sys.path:
+                    sys.path.insert(0, sp)
+                return p
+        except OSError:
+            continue
     return None
 
 
