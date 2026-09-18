@@ -63,4 +63,8 @@
 
 ## License
 
-MIT
+**MIT** —— 适用于本插件仓库（`plugin.yaml` / `tools.py` / `desktop/plugin.js` / 文档）。
+
+> 本插件**不含**仿生大脑本体的代码。大脑代码是独立项目，采用另一套许可证：
+> **[BioBrain](https://github.com/Satyr-Astry/biobrain) · CCSAL-1.0（慈善条款源可用许可证）**。
+> 使用本插件时请遵守各项目各自的许可证；若把大脑代码与本插件一起分发，需同时满足 CCSAL-1.0 与 MIT 的要求。

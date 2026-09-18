@@ -63,4 +63,4 @@ The brain itself needs only `numpy`; `brain_distill` requires a working LLM lang
 
 ## License
 
-See the main [BioBrain](https://github.com/Satyr-Astry/biobrain) repository for the project licence (CCSAL-1.0).
+MIT —— applies to this plugin (the `bio-brain/` directory). Note that this repository does **not** bundle the brain itself: the BioBrain core is a separate project licensed under **CCSAL-1.0** (see [Satyr-Astry/biobrain](https://github.com/Satyr-Astry/biobrain)). When redistributing the brain together with this plugin, both licences apply.
